@@ -1,0 +1,908 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <title>AR Gesture Shooter (Three.js + MediaPipe Hands)</title>
+  <style>
+    html, body { margin:0; height:100%; overflow:hidden; background:#000; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    #wrap { position:fixed; inset:0; overflow:hidden; }
+    video#cam {
+      position:absolute; inset:0; width:100%; height:100%;
+      object-fit:cover; transform: scaleX(-1); /* espejo para “AR” */
+      background:#000;
+    }
+    canvas#gl { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+    #hud {
+      position:absolute; left:0; right:0; top:0; padding:10px 12px;
+      display:flex; align-items:center; justify-content:space-between;
+      color:#fff; text-shadow: 0 2px 10px rgba(0,0,0,.6);
+      pointer-events:none;
+      gap:10px;
+    }
+    .pill {
+      pointer-events:none;
+      background: rgba(0,0,0,.35);
+      border: 1px solid rgba(255,255,255,.15);
+      backdrop-filter: blur(8px);
+      border-radius: 999px;
+      padding: 8px 12px;
+      display:flex; align-items:center; gap:10px;
+      box-shadow: 0 10px 35px rgba(0,0,0,.35);
+      font-weight:600;
+    }
+    .small { font-weight:500; opacity:.9; }
+    #vfx {
+      position:absolute; inset:0; pointer-events:none; overflow:hidden;
+    }
+    .floatText {
+      position:absolute;
+      font-weight:800;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+      transform: translate(-50%,-50%);
+      filter: drop-shadow(0 10px 18px rgba(0,0,0,.6));
+      will-change: transform, opacity;
+      animation: floatUp .65s ease-out forwards;
+    }
+    @keyframes floatUp {
+      from { opacity:1; transform: translate(-50%,-50%) translateY(0) scale(1); }
+      to   { opacity:0; transform: translate(-50%,-50%) translateY(-60px) scale(1.08); }
+    }
+
+    /* Loading Overlay */
+    #loading {
+      position:fixed; inset:0;
+      display:flex; align-items:center; justify-content:center;
+      background: radial-gradient(1200px 900px at 50% 35%, rgba(255,255,255,.08), rgba(0,0,0,.92));
+      color:#fff;
+      z-index: 9999;
+    }
+    #loading .card {
+      width:min(560px, calc(100% - 32px));
+      border-radius: 22px;
+      padding: 18px 18px 16px;
+      background: rgba(0,0,0,.42);
+      border: 1px solid rgba(255,255,255,.12);
+      box-shadow: 0 30px 80px rgba(0,0,0,.55);
+      backdrop-filter: blur(10px);
+    }
+    #loading h1 { margin: 4px 0 8px; font-size: 18px; }
+    #loading p { margin: 0 0 10px; opacity:.88; line-height:1.35; }
+    .bar {
+      height: 10px; border-radius: 999px;
+      background: rgba(255,255,255,.10);
+      overflow:hidden; border:1px solid rgba(255,255,255,.12);
+    }
+    .bar > i {
+      display:block; height:100%;
+      width: 35%;
+      background: linear-gradient(90deg, rgba(255,255,255,.25), rgba(255,255,255,.75), rgba(255,255,255,.25));
+      animation: shimmer 1.05s linear infinite;
+    }
+    @keyframes shimmer { from { transform: translateX(-90%);} to { transform: translateX(280%);} }
+
+    .hint { margin-top:10px; font-size: 13px; opacity:.85; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; opacity:.8; }
+
+    #tapToStart {
+      position:absolute; inset:0;
+      display:none; align-items:flex-end; justify-content:center;
+      padding: 0 18px 22px;
+      pointer-events:none;
+      z-index: 50;
+    }
+    #tapToStart .tap {
+      pointer-events:auto;
+      background: rgba(0,0,0,.45);
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 18px;
+      padding: 12px 14px;
+      color:#fff;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 18px 55px rgba(0,0,0,.55);
+      max-width: 680px;
+      text-align:center;
+      font-weight:650;
+      line-height:1.3;
+    }
+    #tapToStart .tap small { display:block; font-weight:500; opacity:.85; margin-top:6px; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <video id="cam" playsinline muted></video>
+    <canvas id="gl"></canvas>
+
+    <div id="hud">
+      <div class="pill">
+        <span>🎯 Puntos:</span>
+        <span id="score">0</span>
+        <span class="small">·</span>
+        <span class="small" id="status">Cargando…</span>
+      </div>
+      <div class="pill">
+        <span class="small">Discos:</span>
+        <span id="alive">0</span>
+        <span class="small">·</span>
+        <span class="small">Detección:</span>
+        <span id="hz" class="small">—</span>
+      </div>
+    </div>
+
+    <div id="vfx"></div>
+
+    <div id="tapToStart">
+      <div class="tap" id="tapBtn">
+        Toca para habilitar audio y empezar
+        <small>Haz el gesto de “pistola”: índice extendido, otros dedos recogidos. “Disparo” al acercar el pulgar (gatillo).</small>
+      </div>
+    </div>
+  </div>
+
+  <div id="loading">
+    <div class="card">
+      <h1>Preparando la experiencia AR…</h1>
+      <p id="loadText">Pidiendo cámara y descargando el modelo de manos (MediaPipe)…</p>
+      <div class="bar"><i></i></div>
+      <div class="hint">
+        Consejo: si algo falla, revisa permisos de cámara y usa <span class="mono">https://</span> o <span class="mono">localhost</span>.
+      </div>
+      <div class="hint mono" id="loadDiag"></div>
+    </div>
+  </div>
+
+  <!-- Three.js (CDN) -->
+  <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+
+  <!-- MediaPipe Hands (MUST be pinned to 0.4.1646424915 via unpkg) -->
+  <script src="https://unpkg.com/@mediapipe/hands@0.4.1646424915/hands.js"></script>
+
+  <script>
+  (() => {
+    "use strict";
+
+    // =========================
+    // DOM
+    // =========================
+    const video = document.getElementById("cam");
+    const canvas = document.getElementById("gl");
+    const loading = document.getElementById("loading");
+    const loadText = document.getElementById("loadText");
+    const loadDiag = document.getElementById("loadDiag");
+    const tapToStart = document.getElementById("tapToStart");
+    const tapBtn = document.getElementById("tapBtn");
+    const scoreEl = document.getElementById("score");
+    const aliveEl = document.getElementById("alive");
+    const statusEl = document.getElementById("status");
+    const hzEl = document.getElementById("hz");
+    const vfxLayer = document.getElementById("vfx");
+
+    // =========================
+    // Audio (simple synth SFX)
+    // =========================
+    let audioCtx = null;
+    let audioEnabled = false;
+    function ensureAudio() {
+      if (audioEnabled) return;
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      audioEnabled = true;
+    }
+    function beep({ freq=440, dur=0.06, type="sine", gain=0.05, sweep=0, detune=0 } = {}) {
+      if (!audioEnabled || !audioCtx) return;
+      const t0 = audioCtx.currentTime;
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(freq, t0);
+      if (sweep) o.frequency.exponentialRampToValueAtTime(Math.max(40, freq + sweep), t0 + dur);
+      if (detune) o.detune.setValueAtTime(detune, t0);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(gain, t0 + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      o.connect(g).connect(audioCtx.destination);
+      o.start(t0);
+      o.stop(t0 + dur + 0.02);
+    }
+    function sfxShot() { beep({ freq: 900, dur: 0.04, type:"square", gain:0.04, sweep:-380 }); }
+    function sfxHit()  { beep({ freq: 220, dur: 0.08, type:"sawtooth", gain:0.05, sweep: 520 }); }
+    function sfxMiss() { beep({ freq: 140, dur: 0.08, type:"triangle", gain:0.04, sweep:-30 }); }
+
+    // =========================
+    // Three.js setup (transparent overlay)
+    // =========================
+    const renderer = new THREE.WebGLRenderer({ canvas, alpha:true, antialias:true, powerPreference:"high-performance" });
+    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+
+    const scene = new THREE.Scene();
+    // Orthographic camera in pixel units
+    const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+    cam.position.z = 5;
+
+    // Lighting (subtle)
+    const ambient = new THREE.AmbientLight(0xffffff, 0.75);
+    scene.add(ambient);
+
+    // Crosshair + laser
+    const crosshair = new THREE.Group();
+    scene.add(crosshair);
+
+    const crossMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent:true, opacity:0.9 });
+    function makeLine(x1,y1,x2,y2){
+      const geo = new THREE.BufferGeometry().setFromPoints([ new THREE.Vector3(x1,y1,0), new THREE.Vector3(x2,y2,0) ]);
+      return new THREE.Line(geo, crossMat);
+    }
+    // Small plus
+    crosshair.add(makeLine(-10, 0, 10, 0));
+    crosshair.add(makeLine(0, -10, 0, 10));
+
+    // Laser line
+    const laserMat = new THREE.LineBasicMaterial({ color: 0xff4d4d, transparent:true, opacity:0.75 });
+    const laserGeo = new THREE.BufferGeometry().setFromPoints([ new THREE.Vector3(0,0,0), new THREE.Vector3(0,0,0) ]);
+    const laser = new THREE.Line(laserGeo, laserMat);
+    scene.add(laser);
+
+    // =========================
+    // Game entities (discs)
+    // =========================
+    const discs = [];
+    const shatters = [];
+    let score = 0;
+
+    function discTexture() {
+      // Procedural ring disc texture
+      const c = document.createElement("canvas");
+      c.width = c.height = 256;
+      const ctx = c.getContext("2d");
+      ctx.clearRect(0,0,256,256);
+
+      // glow
+      const g = ctx.createRadialGradient(128,128,10, 128,128,120);
+      g.addColorStop(0, "rgba(255,255,255,0.80)");
+      g.addColorStop(0.25, "rgba(255,255,255,0.25)");
+      g.addColorStop(0.55, "rgba(255,255,255,0.07)");
+      g.addColorStop(1, "rgba(255,255,255,0.00)");
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(128,128,120,0,Math.PI*2); ctx.fill();
+
+      // ring
+      ctx.strokeStyle = "rgba(255,255,255,0.75)";
+      ctx.lineWidth = 10;
+      ctx.beginPath(); ctx.arc(128,128,70,0,Math.PI*2); ctx.stroke();
+
+      // inner ring
+      ctx.strokeStyle = "rgba(255,255,255,0.35)";
+      ctx.lineWidth = 5;
+      ctx.beginPath(); ctx.arc(128,128,45,0,Math.PI*2); ctx.stroke();
+
+      // highlight
+      const hg = ctx.createRadialGradient(95,95,5, 95,95,60);
+      hg.addColorStop(0, "rgba(255,255,255,0.55)");
+      hg.addColorStop(1, "rgba(255,255,255,0.00)");
+      ctx.fillStyle = hg;
+      ctx.beginPath(); ctx.arc(95,95,60,0,Math.PI*2); ctx.fill();
+
+      const tex = new THREE.CanvasTexture(c);
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      return tex;
+    }
+    const DISC_TEX = discTexture();
+    const discMat = new THREE.SpriteMaterial({ map: DISC_TEX, transparent:true, opacity:0.95, depthTest:false });
+
+    function spawnDisc() {
+      const w = renderer.domElement.width / (renderer.getPixelRatio());
+      const h = renderer.domElement.height / (renderer.getPixelRatio());
+      const center = new THREE.Vector2(w*0.5, h*0.5);
+
+      const edge = Math.floor(Math.random()*4);
+      const margin = 60;
+      let x,y;
+      if (edge === 0) { x = -margin; y = Math.random()*h; }           // left
+      if (edge === 1) { x = w+margin; y = Math.random()*h; }          // right
+      if (edge === 2) { x = Math.random()*w; y = -margin; }           // top
+      if (edge === 3) { x = Math.random()*w; y = h+margin; }          // bottom
+
+      const sprite = new THREE.Sprite(discMat.clone());
+      const radius = 34 + Math.random()*12;
+      sprite.scale.set(radius*2, radius*2, 1);
+      sprite.position.set(x - w/2, (h/2) - y, 0); // convert to centered coords
+      scene.add(sprite);
+
+      // velocity toward center
+      const toC = new THREE.Vector2(center.x - x, center.y - y).normalize();
+      const speed = 160 + Math.random()*120; // px/s
+      const vx = toC.x * speed;
+      const vy = toC.y * speed;
+
+      const d = {
+        mesh: sprite,
+        radius,
+        x, y,
+        vx, vy,
+        alive: true
+      };
+      discs.push(d);
+      return d;
+    }
+
+    function keepDiscs(n=4) {
+      const alive = discs.filter(d => d.alive);
+      while (alive.length < n) {
+        alive.push(spawnDisc());
+      }
+    }
+
+    function removeDisc(d) {
+      d.alive = false;
+      if (d.mesh) {
+        scene.remove(d.mesh);
+        d.mesh.material.map?.dispose?.();
+        d.mesh.material.dispose?.();
+      }
+    }
+
+    // Shatter VFX (particles)
+    function spawnShatter(px, py) {
+      const count = 28;
+      const geo = new THREE.BufferGeometry();
+      const pos = new Float32Array(count*3);
+      const vel = new Float32Array(count*3);
+
+      for (let i=0;i<count;i++){
+        pos[i*3+0] = px;
+        pos[i*3+1] = py;
+        pos[i*3+2] = 0;
+        const a = Math.random()*Math.PI*2;
+        const sp = 120 + Math.random()*260;
+        vel[i*3+0] = Math.cos(a)*sp;
+        vel[i*3+1] = Math.sin(a)*sp;
+        vel[i*3+2] = 0;
+      }
+      geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      geo.setAttribute("velocity", new THREE.BufferAttribute(vel, 3));
+
+      const mat = new THREE.PointsMaterial({ color: 0xffffff, size: 4, transparent:true, opacity:0.9, depthTest:false });
+      const pts = new THREE.Points(geo, mat);
+      scene.add(pts);
+
+      shatters.push({ pts, life: 0.45 });
+    }
+
+    // =========================
+    // Coordinate helpers
+    // =========================
+    function resize() {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      renderer.setSize(w, h, false);
+      cam.left = -w/2; cam.right = w/2; cam.top = h/2; cam.bottom = -h/2;
+      cam.updateProjectionMatrix();
+    }
+    window.addEventListener("resize", resize, { passive:true });
+    resize();
+
+    // =========================
+    // HUD/VFX helpers
+    // =========================
+    function floatText(text, x, y, isHit) {
+      const el = document.createElement("div");
+      el.className = "floatText";
+      el.textContent = text;
+      el.style.left = x + "px";
+      el.style.top = y + "px";
+      el.style.fontSize = "18px";
+      el.style.color = isHit ? "rgba(120,255,170,0.95)" : "rgba(255,130,130,0.95)";
+      vfxLayer.appendChild(el);
+      el.addEventListener("animationend", () => el.remove());
+    }
+
+    // =========================
+    // MediaPipe Hands (pinned, crash-safe)
+    // =========================
+    const MP_VERSION = "0.4.1646424915";
+    let hands = null;
+    let mpReady = false;
+    let lastResults = null;
+
+    // Detection throttling
+    const DETECT_FPS = 15;               // AI ~15 Hz
+    const DETECT_INTERVAL = 1000 / DETECT_FPS;
+    let detectInFlight = false;
+    let lastDetectTS = 0;
+    let detectHz = 0;
+    let detectCount = 0;
+    let detectHzT0 = performance.now();
+
+    function setLoad(msg, diag="") {
+      loadText.textContent = msg;
+      loadDiag.textContent = diag || "";
+    }
+
+    async function initCamera() {
+      setLoad("Solicitando permiso de cámara…");
+      const constraints = {
+        audio: false,
+        video: {
+          facingMode: "user",
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      video.srcObject = stream;
+      await video.play();
+    }
+
+    function createHands() {
+      setLoad("Inicializando MediaPipe Hands (versión fija)…", `@mediapipe/hands@${MP_VERSION}`);
+      hands = new Hands({
+        locateFile: (file) => `https://unpkg.com/@mediapipe/hands@${MP_VERSION}/${file}`
+      });
+      hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 0,
+        minDetectionConfidence: 0.6,
+        minTrackingConfidence: 0.5
+      });
+
+      hands.onResults((res) => {
+        try {
+          lastResults = res;
+          // Consider “ready” once we got the first callback successfully
+          if (!mpReady) {
+            mpReady = true;
+            statusEl.textContent = "Listo ✅";
+          }
+        } catch (e) {
+          // Safety: never crash on results processing
+          console.warn("onResults error:", e);
+        }
+      });
+    }
+
+    async function warmupModel() {
+      setLoad("Descargando el modelo (no cierres esta pantalla)…");
+      // Force at least one successful send() to ensure WASM/model is fully ready.
+      // This is a practical "model finished downloading" gate.
+      for (let i = 0; i < 6; i++) {
+        try {
+          await hands.send({ image: video });
+          if (mpReady) return;
+        } catch (e) {
+          console.warn("Warmup send() failed:", e);
+          setLoad("Reintentando descarga del modelo…", String(e && e.message ? e.message : e));
+          await new Promise(r => setTimeout(r, 250));
+        }
+      }
+      // Even if warmup was flaky, allow the app to proceed but keep overlay until mpReady flips true.
+    }
+
+    // =========================
+    // Gesture logic (pistol + trigger)
+    // =========================
+    // Landmark indices: https://google.github.io/mediapipe/solutions/hands.html
+    const LM = {
+      WRIST:0,
+      THUMB_CMC:1, THUMB_MCP:2, THUMB_IP:3, THUMB_TIP:4,
+      INDEX_MCP:5, INDEX_PIP:6, INDEX_DIP:7, INDEX_TIP:8,
+      MIDDLE_MCP:9, MIDDLE_PIP:10, MIDDLE_DIP:11, MIDDLE_TIP:12,
+      RING_MCP:13, RING_PIP:14, RING_DIP:15, RING_TIP:16,
+      PINKY_MCP:17, PINKY_PIP:18, PINKY_DIP:19, PINKY_TIP:20
+    };
+
+    function v2(lm){ return { x: lm.x, y: lm.y }; }
+    function dist(a,b){ const dx=a.x-b.x, dy=a.y-b.y; return Math.hypot(dx,dy); }
+    function angle(a,b,c){
+      // angle ABC in degrees
+      const abx=a.x-b.x, aby=a.y-b.y;
+      const cbx=c.x-b.x, cby=c.y-b.y;
+      const dot = abx*cbx + aby*cby;
+      const mab = Math.hypot(abx,aby);
+      const mcb = Math.hypot(cbx,cby);
+      const cos = dot / (Math.max(1e-6, mab*mcb));
+      const clamped = Math.max(-1, Math.min(1, cos));
+      return Math.acos(clamped) * 180/Math.PI;
+    }
+
+    function fingerExtended(lms, mcp, pip, tip) {
+      const A = v2(lms[mcp]), B = v2(lms[pip]), C = v2(lms[tip]);
+      const ang = angle(A,B,C);
+      return ang > 160; // fairly straight
+    }
+    function fingerCurled(lms, mcp, pip, tip) {
+      const A = v2(lms[mcp]), B = v2(lms[pip]), C = v2(lms[tip]);
+      const ang = angle(A,B,C);
+      return ang < 115; // bent
+    }
+
+    let pistolActive = false;
+    let triggerDown = false;
+    let triggerCooldown = 0;
+
+    // Smoothed aim
+    let aimX = 0.5, aimY = 0.5;
+    let aimVel = 0;
+
+    function updateGestureFromResults(res, dt) {
+      // Default: drift crosshair slowly toward center when no hand
+      if (!res || !res.multiHandLandmarks || !res.multiHandLandmarks.length) {
+        pistolActive = false;
+        triggerDown = false;
+        return { hasHand:false };
+      }
+
+      const lms = res.multiHandLandmarks[0];
+
+      // Hand scale for normalization
+      const wrist = v2(lms[LM.WRIST]);
+      const midMcp = v2(lms[LM.MIDDLE_MCP]);
+      const handScale = Math.max(1e-3, dist(wrist, midMcp));
+
+      const idxExt = fingerExtended(lms, LM.INDEX_MCP, LM.INDEX_PIP, LM.INDEX_TIP);
+      const midCur = fingerCurled(lms, LM.MIDDLE_MCP, LM.MIDDLE_PIP, LM.MIDDLE_TIP);
+      const ringCur = fingerCurled(lms, LM.RING_MCP, LM.RING_PIP, LM.RING_TIP);
+      const pinCur = fingerCurled(lms, LM.PINKY_MCP, LM.PINKY_PIP, LM.PINKY_TIP);
+
+      // Pistol pose: index extended, other fingers curled
+      pistolActive = !!(idxExt && midCur && ringCur && pinCur);
+
+      // Aim: use index tip position (normalized 0..1)
+      const idxTip = lms[LM.INDEX_TIP];
+      // MediaPipe is mirrored? video is mirrored; keep same feel by mirroring x:
+      const rawX = 1.0 - idxTip.x;
+      const rawY = idxTip.y;
+
+      // Smooth aim (EMA)
+      const smooth = 1 - Math.pow(0.001, dt); // time-based smoothing
+      aimX += (rawX - aimX) * smooth;
+      aimY += (rawY - aimY) * smooth;
+
+      // Trigger: thumb tip approaches index MCP (like pulling trigger)
+      const thTip = v2(lms[LM.THUMB_TIP]);
+      const idxMcp = v2(lms[LM.INDEX_MCP]);
+
+      const trigDist = dist(thTip, idxMcp) / handScale;  // normalized
+      const pressedNow = pistolActive && (trigDist < 0.52); // threshold tuned
+
+      // Debounce + cooldown to avoid rapid-fire from jitter
+      if (triggerCooldown > 0) triggerCooldown -= dt;
+
+      let fired = false;
+      if (pressedNow && !triggerDown && triggerCooldown <= 0) {
+        fired = true;
+        triggerCooldown = 0.12;
+      }
+      triggerDown = pressedNow;
+
+      return { hasHand:true, fired, pistolActive, aimX, aimY };
+    }
+
+    // =========================
+    // Aim assist + shooting
+    // =========================
+    let snappedTarget = null;
+
+    function screenFromNorm(nx, ny) {
+      // nx,ny in 0..1 => pixel coords
+      const x = nx * window.innerWidth;
+      const y = ny * window.innerHeight;
+      return { x, y };
+    }
+
+    function discScreenPos(d) {
+      return { x: d.x, y: d.y };
+    }
+
+    function updateAimAndLaser(rawScreenX, rawScreenY, dt) {
+      // Magnetic aim assist: attract to nearest disc within radius
+      const MAG_RADIUS = 140; // px
+      let best = null;
+      let bestDist = Infinity;
+
+      for (const d of discs) {
+        if (!d.alive) continue;
+        const dx = d.x - rawScreenX;
+        const dy = d.y - rawScreenY;
+        const dd = Math.hypot(dx,dy);
+        if (dd < bestDist) { bestDist = dd; best = d; }
+      }
+
+      let ax = rawScreenX, ay = rawScreenY;
+      snappedTarget = null;
+
+      if (best && bestDist < MAG_RADIUS) {
+        snappedTarget = best;
+        // stronger pull when closer
+        const t = 1 - (bestDist / MAG_RADIUS);
+        const pull = 0.10 + 0.40*(t*t); // 0.10..0.50
+        ax += (best.x - ax) * pull;
+        ay += (best.y - ay) * pull;
+      }
+
+      // Update crosshair (Three coords are centered; convert screen->world)
+      const w = window.innerWidth, h = window.innerHeight;
+      crosshair.position.set(ax - w/2, (h/2) - ay, 0);
+
+      // Laser end
+      let lx2, ly2;
+      if (snappedTarget) {
+        lx2 = snappedTarget.x;
+        ly2 = snappedTarget.y;
+      } else {
+        // extend toward center direction for a “laser” feel
+        const cx = w*0.5, cy = h*0.5;
+        const dx = (ax - cx), dy = (ay - cy);
+        const len = Math.hypot(dx,dy) || 1;
+        const ux = dx/len, uy = dy/len;
+        lx2 = ax + ux*900;
+        ly2 = ay + uy*900;
+      }
+
+      // set laser geometry (world centered)
+      const p1 = new THREE.Vector3(ax - w/2, (h/2) - ay, 0);
+      const p2 = new THREE.Vector3(lx2 - w/2, (h/2) - ly2, 0);
+      laser.geometry.setFromPoints([p1, p2]);
+      laser.material.opacity = pistolActive ? 0.8 : 0.35;
+      crossMat.opacity = pistolActive ? 0.95 : 0.55;
+
+      return { ax, ay };
+    }
+
+    function shoot(atX, atY) {
+      sfxShot();
+
+      // Hit test: prefer snapped target if within its radius
+      let hitDisc = null;
+
+      if (snappedTarget && snappedTarget.alive) {
+        const dx = snappedTarget.x - atX;
+        const dy = snappedTarget.y - atY;
+        if (Math.hypot(dx,dy) <= snappedTarget.radius * 1.05) {
+          hitDisc = snappedTarget;
+        }
+      } else {
+        // Otherwise find any disc under crosshair
+        for (const d of discs) {
+          if (!d.alive) continue;
+          const dx = d.x - atX;
+          const dy = d.y - atY;
+          if (Math.hypot(dx,dy) <= d.radius) { hitDisc = d; break; }
+        }
+      }
+
+      if (hitDisc) {
+        score += 10;
+        scoreEl.textContent = String(score);
+        floatText("HIT", atX, atY, true);
+        sfxHit();
+        spawnShatter(hitDisc.mesh.position.x, hitDisc.mesh.position.y);
+        removeDisc(hitDisc);
+        keepDiscs(4);
+      } else {
+        floatText("MISS", atX, atY, false);
+        sfxMiss();
+      }
+    }
+
+    // =========================
+    // Main loops: render @60fps, detection throttled + try/catch
+    // =========================
+    let running = false;
+    let lastTS = performance.now();
+
+    function updateGame(dt) {
+      const w = window.innerWidth, h = window.innerHeight;
+      // Move discs toward center
+      for (const d of discs) {
+        if (!d.alive) continue;
+        d.x += d.vx * dt;
+        d.y += d.vy * dt;
+
+        // Slight sway for life
+        const t = performance.now()*0.001;
+        d.x += Math.sin(t*2 + d.vx*0.001) * 0.12;
+        d.y += Math.cos(t*2 + d.vy*0.001) * 0.12;
+
+        // If reaches near center: count as “escape”, respawn
+        const cx = w*0.5, cy = h*0.5;
+        if (Math.hypot(d.x - cx, d.y - cy) < 42) {
+          // Missed one
+          floatText("MISS", cx, cy, false);
+          removeDisc(d);
+          keepDiscs(4);
+        } else {
+          d.mesh.position.set(d.x - w/2, (h/2) - d.y, 0);
+          // subtle scale pulse
+          const pulse = 1 + 0.03*Math.sin((performance.now()*0.004) + d.x*0.01);
+          d.mesh.scale.set(d.radius*2*pulse, d.radius*2*pulse, 1);
+        }
+      }
+
+      // Shatter particles
+      for (let i=shatters.length-1; i>=0; i--) {
+        const s = shatters[i];
+        s.life -= dt;
+        const pts = s.pts;
+        const geo = pts.geometry;
+        const pos = geo.getAttribute("position");
+        const vel = geo.getAttribute("velocity");
+        for (let k=0; k<pos.count; k++){
+          const vx = vel.getX(k), vy = vel.getY(k);
+          pos.setX(k, pos.getX(k) + vx * dt);
+          pos.setY(k, pos.getY(k) + vy * dt);
+          vel.setX(k, vx * 0.86);
+          vel.setY(k, vy * 0.86 - 30*dt); // mild “gravity”
+        }
+        pos.needsUpdate = true;
+        pts.material.opacity = Math.max(0, s.life / 0.45);
+
+        if (s.life <= 0) {
+          scene.remove(pts);
+          pts.geometry.dispose();
+          pts.material.dispose();
+          shatters.splice(i,1);
+        }
+      }
+
+      // Ensure disc count
+      keepDiscs(4);
+      aliveEl.textContent = String(discs.filter(d=>d.alive).length);
+    }
+
+    async function throttledDetect(now) {
+      if (!hands || !video.videoWidth || !video.videoHeight) return;
+      if (detectInFlight) return;
+      if (now - lastDetectTS < DETECT_INTERVAL) return;
+
+      lastDetectTS = now;
+      detectInFlight = true;
+
+      // CRASH-SAFE: wrap send() in try/catch
+      try {
+        await hands.send({ image: video });
+
+        // Detection Hz meter
+        detectCount++;
+        const t = performance.now();
+        if (t - detectHzT0 > 1000) {
+          detectHz = detectCount / ((t - detectHzT0)/1000);
+          detectHzT0 = t;
+          detectCount = 0;
+          hzEl.textContent = detectHz.toFixed(1) + " Hz";
+        }
+      } catch (e) {
+        console.warn("hands.send error:", e);
+        statusEl.textContent = "Protegido (reintentando)";
+        // don't crash; allow next frames
+      } finally {
+        detectInFlight = false;
+      }
+    }
+
+    function frame(now) {
+      const dt = Math.min(0.033, (now - lastTS) / 1000);
+      lastTS = now;
+
+      if (running) {
+        updateGame(dt);
+
+        // Use latest results (from throttled detect loop)
+        let fired = false;
+        let raw = screenFromNorm(aimX, aimY);
+
+        try {
+          const g = updateGestureFromResults(lastResults, dt);
+          if (g && g.hasHand) {
+            raw = screenFromNorm(g.aimX, g.aimY);
+            fired = !!g.fired;
+            statusEl.textContent = g.pistolActive ? "Pistola ✅" : "Mano detectada";
+          } else {
+            statusEl.textContent = "Buscando mano…";
+          }
+        } catch (e) {
+          // CRASH-SAFE: never break on gesture logic
+          console.warn("gesture loop error:", e);
+          statusEl.textContent = "Protegido";
+        }
+
+        const { ax, ay } = updateAimAndLaser(raw.x, raw.y, dt);
+
+        if (fired) shoot(ax, ay);
+
+        renderer.render(scene, cam);
+
+        // AI detection (throttled), rendering remains ~60fps
+        throttledDetect(now);
+      }
+
+      requestAnimationFrame(frame);
+    }
+
+    // =========================
+    // Start flow (loading overlay + model ready gate)
+    // =========================
+    async function boot() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setLoad("Este navegador no soporta getUserMedia.", "Prueba Chrome/Edge.");
+        return;
+      }
+
+      try {
+        await initCamera();
+      } catch (e) {
+        console.error(e);
+        setLoad("No se pudo acceder a la cámara.", String(e && e.message ? e.message : e));
+        return;
+      }
+
+      try {
+        createHands();
+      } catch (e) {
+        console.error(e);
+        setLoad("No se pudo inicializar MediaPipe Hands.", String(e && e.message ? e.message : e));
+        return;
+      }
+
+      // Warmup and wait for mpReady
+      await warmupModel();
+
+      // Keep overlay until mpReady flips
+      const t0 = performance.now();
+      while (!mpReady && (performance.now() - t0) < 10000) {
+        setLoad("Terminando la descarga del modelo…");
+        await new Promise(r => setTimeout(r, 120));
+      }
+
+      // If still not ready, still proceed but keep a message
+      if (!mpReady) {
+        setLoad("El modelo tardó más de lo normal, pero vamos a intentar continuar…", "Si va mal, recarga la página.");
+        await new Promise(r => setTimeout(r, 700));
+      }
+
+      // Audio gate (mobile browsers)
+      tapToStart.style.display = "flex";
+      loading.style.display = "none";
+      statusEl.textContent = "Toca para empezar";
+    }
+
+    function startGame() {
+      ensureAudio();
+      // Prime audio with tiny beep
+      beep({ freq: 520, dur: 0.03, type:"sine", gain:0.02, sweep:40 });
+
+      // Init aim center
+      aimX = 0.5; aimY = 0.5;
+      score = 0; scoreEl.textContent = "0";
+
+      // Clear discs if any
+      for (const d of discs) { try { if (d.alive) removeDisc(d); } catch(_){} }
+      discs.length = 0;
+
+      keepDiscs(4);
+
+      running = true;
+      tapToStart.style.display = "none";
+      statusEl.textContent = "Jugando";
+    }
+
+    tapBtn.addEventListener("click", () => {
+      if (!running) startGame();
+    }, { passive:true });
+
+    // Pause/resume on visibility
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        statusEl.textContent = "Pausado";
+      } else if (running) {
+        statusEl.textContent = "Jugando";
+      }
+    });
+
+    // Kick off
+    requestAnimationFrame(frame);
+    boot();
+  })();
+  </script>
+</body>
+</html>
